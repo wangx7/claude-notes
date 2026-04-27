@@ -1,10 +1,18 @@
 set +H
-ROOT=$(git rev-parse --show-toplevel)
-if [ -z "$ROOT" ]; then echo "不在 Git 仓库内"; exit 1; fi
-echo "仓库根目录: $ROOT"
+
+# 全局 hooks 目录
+HOOKS_DIR="$HOME/.git-hooks"
+
+echo "=== Git Hooks 全局安装 ==="
+echo ""
+echo "将安装到: $HOOKS_DIR"
+echo ""
+
+# 创建目录
+mkdir -p "$HOOKS_DIR"
 
 # pre-commit: 提交前审查代码
-cat > "$ROOT/.git/hooks/pre-commit" << 'H1'
+cat > "$HOOKS_DIR/pre-commit" << 'H1'
 #!/bin/bash
 ROOT=$(git rev-parse --show-toplevel)
 DIFF_FILE=$(mktemp)
@@ -43,7 +51,7 @@ exit 0
 H1
 
 # prepare-commit-msg: 自动生成 commit message
-cat > "$ROOT/.git/hooks/prepare-commit-msg" << 'H2'
+cat > "$HOOKS_DIR/prepare-commit-msg" << 'H2'
 #!/bin/bash
 COMMIT_MSG_FILE=$1
 SOURCE=$2
@@ -70,7 +78,7 @@ exit 0
 H2
 
 # commit-msg: 校验 commit message 格式
-cat > "$ROOT/.git/hooks/commit-msg" << 'H3'
+cat > "$HOOKS_DIR/commit-msg" << 'H3'
 #!/bin/bash
 MSG_FILE=$1
 MSG=$(head -n 1 "$MSG_FILE")
@@ -89,7 +97,7 @@ exit 0
 H3
 
 # pre-push: 推送前审查代码
-cat > "$ROOT/.git/hooks/pre-push" << 'H4'
+cat > "$HOOKS_DIR/pre-push" << 'H4'
 #!/bin/bash
 REMOTE=$1
 URL=$2
@@ -134,7 +142,7 @@ exit 0
 H4
 
 # post-merge: 合并后总结改动（异步）
-cat > "$ROOT/.git/hooks/post-merge" << 'H5'
+cat > "$HOOKS_DIR/post-merge" << 'H5'
 #!/bin/bash
 (
     ROOT=$(git rev-parse --show-toplevel)
@@ -165,7 +173,7 @@ exit 0
 H5
 
 # post-checkout: 拉取后总结改动（异步）
-cat > "$ROOT/.git/hooks/post-checkout" << 'H6'
+cat > "$HOOKS_DIR/post-checkout" << 'H6'
 #!/bin/bash
 PREV_HEAD=$1
 NEW_HEAD=$2
@@ -201,10 +209,18 @@ exit 0
 H6
 
 # 设置执行权限
-chmod +x "$ROOT/.git/hooks/pre-commit" "$ROOT/.git/hooks/prepare-commit-msg" "$ROOT/.git/hooks/commit-msg" "$ROOT/.git/hooks/pre-push" "$ROOT/.git/hooks/post-merge" "$ROOT/.git/hooks/post-checkout"
+chmod +x "$HOOKS_DIR"/*
+
+# 配置 Git 使用全局 hooks 目录
+git config --global core.hooksPath "$HOOKS_DIR"
 
 echo ""
-echo "✅ 安装完成"
+echo "✅ 全局安装完成"
+echo ""
+echo "Hooks 目录: $HOOKS_DIR"
+echo "Git 配置: core.hooksPath = $HOOKS_DIR"
+echo ""
+echo "所有 Git 仓库将自动使用这些 hooks"
 echo ""
 echo "pre-commit：提交前同步审查，严重问题阻止提交"
 echo "prepare-commit-msg：自动生成 Conventional Commits 格式 message"
