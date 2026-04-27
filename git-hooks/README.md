@@ -1,90 +1,73 @@
-# Git Hooks 自动化代码审查
+# Claude Git Hooks — AI 代码审查
 
-使用 Claude 在 Git 提交、推送、合并时自动审查代码，发现安全问题、生成 commit message、总结改动。
+Git 提交、推送、拉取时自动调用 Claude 审查代码。
 
-## 功能
+## 工作流程
 
-| Hook | 功能 | 阻断性 |
-|------|------|--------|
-| `pre-commit` | 提交前审查代码，检查安全漏洞和 bug | 是（可跳过） |
-| `prepare-commit-msg` | 自动生成 Conventional Commits 格式的 commit message | 否 |
-| `commit-msg` | 校验 commit message 格式 | 是（可跳过） |
-| `pre-push` | 推送前审查代码，检查安全问题 | 是（可跳过） |
-| `post-merge` | 合并后总结改动（异步） | 否 |
-| `post-checkout` | 拉取后总结改动（异步） | 否 |
-
-## 特性
-
-- **只审查文本文件**：自动跳过图片等二进制文件
-- **内置 prompt**：无需额外配置文件
-- **VS Code 集成**：审查结果自动在 VS Code 中打开
-
-## 安装方式
-
-### 方式一：单仓库安装（推荐用于测试）
-
-在 Git 仓库根目录执行：
-
-```bash
-bash /path/to/install.sh
+```
+git add .
+git commit        # → Claude 审查代码 + 自动生成 commit message
+git push          # → Claude 审查代码，严重问题阻止推送
+git pull          # → Claude 异步总结引入的改动
+git merge branch  # → Claude 异步总结合并的改动
 ```
 
-安装后会直接覆盖已有的 hooks 并安装 6 个 hooks 到 `.git/hooks/`。
+## 功能说明
 
-### 方式二：全局安装（推荐长期使用）
+| 操作 | 触发的 Hook | 行为 |
+|------|------------|------|
+| `git commit` | `prepare-commit-msg` | 审查暂存区代码 + 生成 message |
+| `git push` | `pre-push` | 审查待推送代码，**严重问题阻止推送** |
+| `git pull` | `post-merge` | 异步审查引入的改动（不阻断） |
+| `git merge` | `post-merge` | 异步审查合并的改动（不阻断） |
 
-全局安装后，**所有 Git 仓库**都会自动使用这些 hooks：
+辅助 hooks：
+- `pre-commit` — 检查是否有暂存内容
+- `commit-msg` — 校验 message 是否符合 [Conventional Commits](https://www.conventionalcommits.org/) 规范
+
+审查结果自动保存到 `/tmp/claude-review-*.md`，安装了 VS Code 会自动打开。
+
+## 安装
+
+**前提**：已安装 [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli)
+
+### 全局安装（推荐）
+
+所有 Git 仓库自动生效：
 
 ```bash
 bash /path/to/install-global.sh
 ```
 
-安装位置：`~/.git-hooks/`
+### 单仓库安装
 
-原理：设置 Git 全局配置 `core.hooksPath`，所有仓库共享同一套 hooks。
-
-## 使用
-
-安装后正常使用 Git 即可：
+仅当前仓库生效（在仓库目录内执行）：
 
 ```bash
-git add .
-git commit    # 自动审查代码、生成 commit message
-git push      # 推送前审查代码
-git pull      # 拉取后总结改动
+bash /path/to/install.sh
 ```
-
-审查结果会自动在 VS Code 中打开（如果安装了 VS Code）。
 
 ## 跳过审查
 
 ```bash
-git commit --no-verify    # 跳过提交相关 hooks
-git push --no-verify      # 跳过推送审查
+git commit --no-verify    # 跳过 commit 相关 hooks
+git push --no-verify      # 跳过 push 审查
 ```
 
 ## 卸载
 
-### 单仓库卸载
-
 ```bash
-rm -f .git/hooks/pre-commit .git/hooks/prepare-commit-msg .git/hooks/commit-msg .git/hooks/pre-push .git/hooks/post-merge .git/hooks/post-checkout
+# 全局卸载
+git config --global --unset core.hooksPath && rm -rf ~/.git-hooks
+
+# 单仓库卸载
+rm -f .git/hooks/{pre-commit,prepare-commit-msg,commit-msg,pre-push,post-merge}
 ```
 
-### 全局卸载
-
-```bash
-# 恢复 Git 默认行为（每个仓库使用自己的 .git/hooks/）
-git config --global --unset core.hooksPath
-
-# 删除全局 hooks 目录
-rm -rf ~/.git-hooks
-```
-
-## 文件说明
+## 文件
 
 | 文件 | 说明 |
 |------|------|
-| `install.sh` | 单仓库安装脚本 |
 | `install-global.sh` | 全局安装脚本 |
-| `README.md` | 使用说明文档 |
+| `install.sh` | 单仓库安装脚本 |
+| `README.md` | 本文档 |

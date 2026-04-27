@@ -1,232 +1,148 @@
-set +H
+set +H 2>/dev/null  # 兼容终端直接粘贴运行（必须第一行，`!` 会触发 zsh 历史展开）
 
-# 全局 hooks 目录
 HOOKS_DIR="$HOME/.git-hooks"
 
-echo "=== Git Hooks 全局安装 ==="
-echo ""
-echo "将安装到: $HOOKS_DIR"
+echo "=== Claude Git Hooks 全局安装 ==="
+echo "安装目录: $HOOKS_DIR"
 echo ""
 
-# 创建目录
+# 检查依赖
+if ! command -v claude >/dev/null 2>&1; then
+    echo "⚠️  未检测到 claude CLI，安装后 hooks 将无法工作"
+    echo "   安装: https://docs.anthropic.com/en/docs/claude-cli"
+    echo ""
+fi
+
 mkdir -p "$HOOKS_DIR"
 
-# pre-commit: 提交前审查代码
-cat > "$HOOKS_DIR/pre-commit" << 'H1'
-#!/bin/bash
-ROOT=$(git rev-parse --show-toplevel)
-DIFF_FILE=$(mktemp)
-# 排除删除的文件，过滤二进制文件
-git diff --cached --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-if [ ! -s "$DIFF_FILE" ]; then
-    git diff HEAD --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
+# ==================== pre-commit ====================
+# 轻量检查：暂存区是否有内容
+cat > "$HOOKS_DIR/pre-commit" << 'HOOK'
+#!/usr/bin/env bash
+if git diff --cached --quiet; then
+    echo "没有暂存的改动，请先 git add"
+    exit 1
 fi
-if [ -s "$DIFF_FILE" ]; then
-    PROMPT="审查即将提交的代码，总结改动、检查安全漏洞、给出优化建议，用中文简洁回答。如果有严重安全问题或严重bug，请在回复第一行写 【BLOCK】，否则第一行写 【PASS】。"
-    echo "🤖 Claude 正在审查..."
-    RESULT=$(claude -p "${PROMPT}。请读取文件 $DIFF_FILE（git diff 格式），按上述要求回答。" --output-format text 2>&1)
-    TIMESTAMP=$(date +%Y%m%d%H%M%S)
-    TMPFILE="/tmp/claude-review-${TIMESTAMP}.md"
-    {
-        echo "🤖 Claude 审查结果（pre-commit）"
-        echo ""
-        echo "$RESULT"
-        echo ""
-        echo "---"
-        echo "临时文件，系统重启时自动清理；macOS/Linux 长时间（通常3天以上）未访问也可能被清理"
-    } > "$TMPFILE"
-    if command -v code >/dev/null 2>&1; then
-        code -r "$TMPFILE" 2>/dev/null || true
+HOOK
+
+# ==================== prepare-commit-msg ====================
+# 【核心】commit 时：审查代码 + 生成 message
+cat > "$HOOKS_DIR/prepare-commit-msg" << 'HOOK'
+#!/usr/bin/env bash
+COMMIT_MSG_FILE=$1
+SOURCE=${2:-}
+
+# 用户已提供 message（-m / -F / template / squash），跳过
+[[ -n "$SOURCE" ]] && exit 0
+
+echo "🤖 Claude 正在审查代码并生成 commit message..."
+
+RESULT=$(claude -p "你是代码审查助手。执行 git diff --cached --diff-filter=d 查看暂存区改动。
+
+任务：
+1. 审查代码：检查安全漏洞、逻辑错误、代码质量
+2. 生成 commit message：符合 Conventional Commits 规范的中文描述
+
+严格按以下格式输出（不要加多余标记）：
+第一行：【PASS】或【BLOCK】（仅严重安全/逻辑问题才 BLOCK）
+第二行：commit message（如 feat: 新增用户认证模块）
+第三行起：审查详情
+
+用中文回答。只看暂存区，不看工作区。" --output-format text 2>&1) || true
+
+# 保存审查结果
+TMPFILE="/tmp/claude-review-commit-$(date +%Y%m%d%H%M%S)-$$.md"
+printf "🤖 Claude 审查结果（commit）\n\n%s\n" "$RESULT" > "$TMPFILE"
+command -v code >/dev/null 2>&1 && code -r "$TMPFILE" 2>/dev/null || true
+
+# 提取 commit message：优先匹配 Conventional Commits 格式，fallback 取第二行
+MSG=$(echo "$RESULT" | grep -m1 -E '^(feat|fix|docs|style|refactor|test|chore|ci|build|perf|revert)' || true)
+if [[ -z "$MSG" ]]; then
+    MSG=$(echo "$RESULT" | sed -n '2p' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+fi
+[[ -n "$MSG" && "$MSG" != "null" ]] && echo "$MSG" > "$COMMIT_MSG_FILE"
+
+# BLOCK 提示（不阻断，用户可在编辑器中决定）
+if echo "$RESULT" | head -5 | grep -q "【BLOCK】"; then
+    echo ""
+    echo "⚠️  发现严重问题，请检查审查结果后决定是否继续"
+fi
+HOOK
+
+# ==================== commit-msg ====================
+# 轻量校验：message 格式
+cat > "$HOOKS_DIR/commit-msg" << 'HOOK'
+#!/usr/bin/env bash
+MSG=$(head -1 "$1")
+[[ -z "$MSG" ]] && echo "commit message 不能为空" && exit 1
+if ! echo "$MSG" | grep -qE '^(feat|fix|docs|style|refactor|test|chore|ci|build|perf|revert)(\(.+\))?!?: .+'; then
+    echo "❌ 不符合 Conventional Commits 规范"
+    echo "   当前: $MSG"
+    echo "   示例: feat: 新增登录功能 / fix(auth): 修复超时"
+    echo "   跳过: git commit --no-verify"
+    exit 1
+fi
+HOOK
+
+# ==================== pre-push ====================
+# 【核心】push 时：审查代码（阻断）
+cat > "$HOOKS_DIR/pre-push" << 'HOOK'
+#!/usr/bin/env bash
+ZERO="0000000000000000000000000000000000000000"
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    [[ "$LOCAL_SHA" == "$ZERO" ]] && continue
+    echo "🤖 Claude 正在审查即将推送的代码..."
+
+    if [[ "$REMOTE_SHA" == "$ZERO" ]]; then
+        DIFF_CMD="git log --patch -1 --diff-filter=d"
+    else
+        DIFF_CMD="git log --patch $REMOTE_SHA..$LOCAL_SHA --diff-filter=d"
     fi
-    if echo "$RESULT" | head -n 10 | grep -q "【BLOCK】"; then
+
+    RESULT=$(claude -p "你是代码安全审查助手。执行 $DIFF_CMD 查看待推送的改动。
+重点检查：严重安全漏洞、敏感信息泄露（密钥/密码/token）、危险操作。
+第一行写【PASS】或【BLOCK】，后续简述原因。用中文回答。" --output-format text 2>&1) || true
+
+    TMPFILE="/tmp/claude-review-push-$(date +%Y%m%d%H%M%S)-$$.md"
+    printf "🤖 Claude 审查结果（push）\n\n%s\n" "$RESULT" > "$TMPFILE"
+    command -v code >/dev/null 2>&1 && code -r "$TMPFILE" 2>/dev/null || true
+
+    if echo "$RESULT" | head -5 | grep -q "【BLOCK】"; then
         echo ""
-        echo "❌ 审查发现严重问题，提交已阻止"
-        echo "💡 如需强制提交：git commit --no-verify"
+        echo "❌ 推送被阻止，请检查审查结果"
+        echo "   强制推送: git push --no-verify"
         exit 1
     fi
-    echo "✅ 审查通过"
-fi
-rm -f "$DIFF_FILE"
-exit 0
-H1
-
-# prepare-commit-msg: 自动生成 commit message
-cat > "$HOOKS_DIR/prepare-commit-msg" << 'H2'
-#!/bin/bash
-COMMIT_MSG_FILE=$1
-SOURCE=$2
-if [ "$SOURCE" = "message" ] || [ "$SOURCE" = "template" ] || [ "$SOURCE" = "squash" ]; then
-    exit 0
-fi
-ROOT=$(git rev-parse --show-toplevel)
-DIFF_FILE=$(mktemp)
-# 排除删除的文件，过滤二进制文件
-git diff --cached --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-if [ ! -s "$DIFF_FILE" ]; then
-    git diff HEAD --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-fi
-if [ -s "$DIFF_FILE" ]; then
-    PROMPT="根据代码改动生成一条符合 Conventional Commits 规范的中文 commit message"
-    RESULT=$(claude -p "${PROMPT}。请读取文件 $DIFF_FILE（git diff 格式），只返回一条符合 Conventional Commits 规范的中文 commit message，不要解释。格式示例：feat: 新增用户登录功能" --output-format text 2>&1)
-    FIRST_LINE=$(echo "$RESULT" | head -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    if [ -n "$FIRST_LINE" ] && [ "$FIRST_LINE" != "null" ]; then
-        echo "$FIRST_LINE" > "$COMMIT_MSG_FILE"
-    fi
-fi
-rm -f "$DIFF_FILE"
-exit 0
-H2
-
-# commit-msg: 校验 commit message 格式
-cat > "$HOOKS_DIR/commit-msg" << 'H3'
-#!/bin/bash
-MSG_FILE=$1
-MSG=$(head -n 1 "$MSG_FILE")
-if [ -z "$MSG" ] || [ "$MSG" = "null" ]; then
-    echo "提交信息不能为空"
-    exit 1
-fi
-if ! echo "$MSG" | grep -qE '^(feat|fix|docs|style|refactor|test|chore|ci|build|perf|revert)(\(.+\))?: .+'; then
-    echo "提交信息不符合 Conventional Commits 规范"
-    echo "当前: $MSG"
-    echo "示例: feat: 新增登录功能"
-    echo "💡 如需跳过校验：git commit --no-verify"
-    exit 1
-fi
-exit 0
-H3
-
-# pre-push: 推送前审查代码
-cat > "$HOOKS_DIR/pre-push" << 'H4'
-#!/bin/bash
-REMOTE=$1
-URL=$2
-while read LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
-    if [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ]; then
-        continue
-    fi
-    DIFF_FILE=$(mktemp)
-    if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
-        git log --patch "$LOCAL_SHA" -1 --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-    else
-        git log --patch "$REMOTE_SHA..$LOCAL_SHA" --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-    fi
-    if [ -s "$DIFF_FILE" ]; then
-        ROOT=$(git rev-parse --show-toplevel)
-        PROMPT="审查即将推送到远程的代码改动，检查是否有严重安全问题。如果有严重问题，第一行写【BLOCK】，否则写【PASS】。用中文简洁回答。"
-        echo "🤖 Claude 正在审查即将推送的代码..."
-        RESULT=$(claude -p "${PROMPT}。请读取文件 $DIFF_FILE（git diff 格式），按上述要求回答。" --output-format text 2>&1)
-        TIMESTAMP=$(date +%Y%m%d%H%M%S)
-        TMPFILE="/tmp/claude-review-push-${TIMESTAMP}.md"
-        {
-            echo "🤖 Claude 审查结果（pre-push）"
-            echo ""
-            echo "$RESULT"
-            echo ""
-            echo "---"
-            echo "临时文件，系统重启时自动清理；macOS/Linux 长时间（通常3天以上）未访问也可能被清理"
-        } > "$TMPFILE"
-        if command -v code >/dev/null 2>&1; then
-            code -r "$TMPFILE" 2>/dev/null || true
-        fi
-        if echo "$RESULT" | head -n 10 | grep -q "【BLOCK】"; then
-            echo ""
-            echo "❌ 推送审查未通过，push 已阻止"
-            rm -f "$DIFF_FILE"
-            exit 1
-        fi
-    fi
-    rm -f "$DIFF_FILE"
 done
-exit 0
-H4
+HOOK
 
-# post-merge: 合并后总结改动（异步）
-cat > "$HOOKS_DIR/post-merge" << 'H5'
-#!/bin/bash
+# ==================== post-merge ====================
+# 【核心】pull / merge 后：审查代码（异步不阻断）
+cat > "$HOOKS_DIR/post-merge" << 'HOOK'
+#!/usr/bin/env bash
 (
-    ROOT=$(git rev-parse --show-toplevel)
-    DIFF_FILE=$(mktemp)
-    # 只获取文本文件的 diff，过滤二进制文件
-    git diff ORIG_HEAD..HEAD --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-    if [ -s "$DIFF_FILE" ]; then
-        PROMPT="总结合并引入的代码改动，检查冲突解决是否正确、有无安全隐患，用中文"
-        RESULT=$(claude -p "${PROMPT}。请读取文件 $DIFF_FILE（git diff 格式），按上述要求回答。" --output-format text 2>&1)
-        COMMIT_ID=$(git rev-parse --short HEAD)
-        TMPFILE="/tmp/claude-review-${COMMIT_ID}.md"
-        {
-            echo "🤖 Claude 审查结果（post-merge）"
-            echo "对应提交: ${COMMIT_ID}"
-            echo ""
-            echo "$RESULT"
-            echo ""
-            echo "---"
-            echo "临时文件，系统重启时自动清理；macOS/Linux 长时间（通常3天以上）未访问也可能被清理"
-        } > "$TMPFILE"
-        if command -v code >/dev/null 2>&1; then
-            code -r "$TMPFILE" 2>/dev/null || true
-        fi
-    fi
-    rm -f "$DIFF_FILE"
-) &
-exit 0
-H5
+    RESULT=$(claude -p "你是代码审查助手。执行 git diff ORIG_HEAD..HEAD --diff-filter=d 查看本次 pull/merge 引入的改动。
+总结关键变更，检查是否有安全隐患或破坏性变更。用中文简洁回答。" --output-format text 2>&1) || true
 
-# post-checkout: 拉取后总结改动（异步）
-cat > "$HOOKS_DIR/post-checkout" << 'H6'
-#!/bin/bash
-PREV_HEAD=$1
-NEW_HEAD=$2
-FLAG=$3
-if git reflog -1 | grep -qE 'pull|merge'; then
-    (
-        ROOT=$(git rev-parse --show-toplevel)
-        DIFF_FILE=$(mktemp)
-        # 只获取文本文件的 diff，过滤二进制文件
-        git diff "$PREV_HEAD..$NEW_HEAD" --diff-filter=d 2>/dev/null | grep -v "^Binary files " > "$DIFF_FILE"
-        if [ -s "$DIFF_FILE" ]; then
-            PROMPT="总结拉取的更新，检查是否有破坏性变更或安全问题，用中文"
-            RESULT=$(claude -p "${PROMPT}。请读取文件 $DIFF_FILE（git diff 格式），按上述要求回答。" --output-format text 2>&1)
-            COMMIT_ID=$(git rev-parse --short HEAD)
-            TMPFILE="/tmp/claude-review-${COMMIT_ID}.md"
-            {
-                echo "🤖 Claude 审查结果（post-checkout / pull）"
-                echo "对应提交: ${COMMIT_ID}"
-                echo ""
-                echo "$RESULT"
-                echo ""
-                echo "---"
-                echo "临时文件，系统重启时自动清理；macOS/Linux 长时间（通常3天以上）未访问也可能被清理"
-            } > "$TMPFILE"
-            if command -v code >/dev/null 2>&1; then
-                code -r "$TMPFILE" 2>/dev/null || true
-            fi
-        fi
-        rm -f "$DIFF_FILE"
-    ) &
-fi
-exit 0
-H6
+    COMMIT_ID=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    TMPFILE="/tmp/claude-review-merge-${COMMIT_ID}-$$.md"
+    printf "🤖 Claude 审查结果（pull/merge）\n提交: %s\n\n%s\n" "$COMMIT_ID" "$RESULT" > "$TMPFILE"
+    command -v code >/dev/null 2>&1 && code -r "$TMPFILE" 2>/dev/null || true
+) >/dev/null 2>&1 &
+disown 2>/dev/null || true
+HOOK
 
-# 设置执行权限
+# 设置权限 & 配置 Git
 chmod +x "$HOOKS_DIR"/*
-
-# 配置 Git 使用全局 hooks 目录
 git config --global core.hooksPath "$HOOKS_DIR"
 
 echo ""
-echo "✅ 全局安装完成"
+echo "✅ 安装完成"
 echo ""
-echo "Hooks 目录: $HOOKS_DIR"
-echo "Git 配置: core.hooksPath = $HOOKS_DIR"
+echo "  commit  → 审查代码 + 生成 commit message"
+echo "  push    → 审查代码（严重问题阻止推送）"
+echo "  pull    → 审查引入的改动（异步）"
+echo "  merge   → 审查合并的改动（异步）"
 echo ""
-echo "所有 Git 仓库将自动使用这些 hooks"
-echo ""
-echo "pre-commit：提交前同步审查，严重问题阻止提交"
-echo "prepare-commit-msg：自动生成 Conventional Commits 格式 message"
-echo "commit-msg：校验 message 格式"
-echo "pre-push：推送前同步审查，严重问题阻止推送"
-echo "post-merge：合并后异步总结"
-echo "post-checkout：拉取后异步总结"
-echo ""
-echo "如需跳过所有钩子：git commit --no-verify 或 git push --no-verify"
+echo "跳过: git commit/push --no-verify"
+echo "卸载: git config --global --unset core.hooksPath && rm -rf $HOOKS_DIR"
