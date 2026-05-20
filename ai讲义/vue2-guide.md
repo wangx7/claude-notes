@@ -1883,7 +1883,7 @@ this.$store.getters.doubleCount      // 派生数据
 <!-- 子组件 UserList.vue -->
 <template>
   <ul>
-    <li v-for="user in users" :key="user.id">
+    <li v-for="(user, index) in users" :key="user.id">
       <!-- 把 user 数据暴露给父组件 -->
       <slot :user="user" :index="index">
         {{ user.name }}              <!-- 默认渲染方式 -->
@@ -2306,15 +2306,61 @@ Vue.mixin({
 // 如果 mixin 很多，排查很痛苦
 ```
 
-### 12.5 替代方案
+### 12.5 替代方案——Renderless Component
 
-Vue 2 没有 Composition API，但可以用以下方式减少 mixin 的使用：
+Vue 2 最推荐的 mixin 替代方案是 **Renderless Component（无渲染组件）**：只处理逻辑，不渲染任何 DOM，通过作用域插槽把数据暴露给父组件自由渲染。
 
-- **高阶组件（HOC）**：用函数包装组件，注入额外逻辑
-- **作用域插槽**：用 renderless component（无渲染组件）+ 作用域插槽暴露数据
-- **$options 自定义**：用自定义选项 + 全局 mixin 实现统一处理
+```html
+<!-- MouseTracker.vue —— 只管逻辑，不管 UI -->
+<template>
+  <!-- 没有自己的 DOM，直接渲染插槽 -->
+  <slot :x="x" :y="y" />
+</template>
 
-> 💡 Vue 3 引入了 Composition API，可以用 `useXxx()` 函数替代 mixin，解决了命名冲突和来源不清的问题。如果你的 Vue 2 项目可以升级，这是最好的解决方案。Vue 2.7 也已经支持了 Composition API。
+<script>
+export default {
+  name: 'MouseTracker',
+  data() {
+    return { x: 0, y: 0 }
+  },
+  mounted() {
+    window.addEventListener('mousemove', this.update)
+  },
+  beforeDestroy() {
+    window.removeEventListener('mousemove', this.update)  // 记得清理
+  },
+  methods: {
+    update(e) {
+      this.x = e.clientX
+      this.y = e.clientY
+    },
+  },
+}
+</script>
+```
+
+```html
+<!-- 父组件：拿到数据，完全自由决定怎么渲染 -->
+<MouseTracker v-slot="{ x, y }">
+  <p>鼠标位置：{{ x }}, {{ y }}</p>
+</MouseTracker>
+
+<!-- 同一个逻辑组件，换一套 UI -->
+<MouseTracker v-slot="{ x, y }">
+  <div class="cursor-dot" :style="{ left: x + 'px', top: y + 'px' }" />
+</MouseTracker>
+```
+
+**对比 mixin 的优势**：
+
+| 对比 | Mixin | Renderless Component |
+|------|-------|---------------------|
+| 数据来源 | 隐式混入，不清楚从哪来 | 明确：从 `v-slot` 解构拿到 |
+| 命名冲突 | 容易冲突 | 不冲突（作用域隔离） |
+| 逻辑复用 | 多组件共用同一份逻辑 ✅ | 同样可以 ✅ |
+| UI 自定义 | 难以定制 | 完全由使用方控制 ✅ |
+
+> 💡 Vue 3 引入了 Composition API，可以用 `useXxx()` 函数替代 mixin 和 renderless component，写法更简洁。Vue 2.7 也已经支持了 Composition API。
 
 ---
 
@@ -2410,7 +2456,73 @@ methods: {
 
 ## 十四、Vue Router 3
 
-### 14.1 基本配置
+### 14.1 Vue.use()——插件安装原理
+
+在配置路由之前，先看一眼 `Vue.use(VueRouter)` 到底做了什么，因为 Vuex 也是同样的套路。
+
+```js
+// 源码简化版：src/core/global-api/use.js
+
+Vue.use = function(plugin) {
+  const installedPlugins = this._installedPlugins || (this._installedPlugins = [])
+
+  // ★ 防止重复安装
+  if (installedPlugins.indexOf(plugin) > -1) return this
+
+  const args = [this]   // 第一个参数固定是 Vue 构造函数
+
+  // 调用插件的 install 方法
+  if (typeof plugin.install === 'function') {
+    plugin.install.apply(plugin, args)     // 优先用 install 方法
+  } else if (typeof plugin === 'function') {
+    plugin.apply(null, args)               // 插件本身是函数时直接调用
+  }
+
+  installedPlugins.push(plugin)
+  return this
+}
+```
+
+**VueRouter 的 install 做了什么**：
+
+```js
+// vue-router/src/install.js（简化）
+
+VueRouter.install = function(Vue) {
+  // 1. 全局混入：每个组件创建时注入 $router 和 $route
+  Vue.mixin({
+    beforeCreate() {
+      if (this.$options.router) {
+        // 根组件：把 router 挂到自己身上
+        this._routerRoot = this
+        this._router = this.$options.router
+        this._router.init(this)
+        // 让 _route 变成响应式（路由变化 → 视图更新的关键）
+        Vue.util.defineReactive(this, '_route', this._router.history.current)
+      } else {
+        // 子组件：沿着父链找到根组件的 _routerRoot
+        this._routerRoot = this.$parent && this.$parent._routerRoot
+      }
+    },
+  })
+
+  // 2. 在原型上挂 $router 和 $route，所有组件都能用 this.$router
+  Object.defineProperty(Vue.prototype, '$router', {
+    get() { return this._routerRoot._router },
+  })
+  Object.defineProperty(Vue.prototype, '$route', {
+    get() { return this._routerRoot._route },
+  })
+
+  // 3. 全局注册 <router-view> 和 <router-link> 组件
+  Vue.component('RouterView', RouterView)
+  Vue.component('RouterLink', RouterLink)
+}
+```
+
+> 💡 **核心规律**：所有 Vue 插件（Router、Vuex、Element UI 等）都遵循这个模式——实现一个 `install(Vue)` 方法，通过 `Vue.mixin`、`Vue.prototype` 或全局组件来扩展 Vue。`Vue.use()` 负责调用这个方法并防止重复安装。
+
+### 14.2 基本配置
 
 ```js
 // router/index.js
@@ -2884,6 +2996,34 @@ export default {
   },
 }
 ```
+
+**函数式组件示例**：
+
+```html
+<!-- ❌ 普通组件：哪怕只是渲染一个 label，也有完整实例开销 -->
+<script>
+export default {
+  props: ['label', 'value'],
+}
+</script>
+<template>
+  <span class="tag">{{ label }}: {{ value }}</span>
+</template>
+
+<!-- ✅ 函数式组件：无实例、无响应式、无生命周期，渲染更快 -->
+<template functional>
+  <span class="tag">{{ props.label }}: {{ props.value }}</span>
+</template>
+
+<script>
+export default {
+  functional: true,    // ★ 声明为函数式组件
+  props: ['label', 'value'],
+}
+</script>
+```
+
+> 💡 函数式组件没有 `this`（无实例），模板里用 `props.xxx` 访问数据。适用场景：纯展示、不需要内部状态、不需要生命周期的叶子节点组件（如 Tag、Badge、Icon 等）。在长列表中大量渲染这类组件时，性能提升明显。
 
 ---
 
