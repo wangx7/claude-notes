@@ -14,3 +14,4 @@ AI 辅助编程教学讲义，涵盖前端主流技术栈与后端 Java 全家�
 | [Vue3 指南](./vue3-guide.md) | Vue 3 框架开发指南 |
 | [Java 全家桶指南](./java-guide.md) | Java 后端全家桶——从语言基础到微服务部署 |
 | [设计指南](./design-guide.md) | 设计基础、UI 设计、交互设计、设计流程、设计系统、工具推荐等 |
+| [Trae AI 指南](./trae-guide.md) | Trae AI 编程助手精讲——核心架构、Chat/Builder/SOLO 模式、Skills 与 MCP、多 Agent 协作、最优方案与最佳实践 |
